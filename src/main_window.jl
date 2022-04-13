@@ -49,9 +49,9 @@ function main()
         end
     end
 
-    canvas.mouse.scroll = @guarded (w, e) -> begin
+    canvas.mouse.scroll = @guarded (wid, e) -> begin
         # figure out current extents
-        _, east, south, _ = get_canvas_bbox(w, north, west, height_degrees)
+        _, east, south, _ = get_canvas_bbox(wid, north, west, height_degrees)
 
         # shrink or expand bbox around cursor
         # the point under the mouse should remain in exactly the same place
@@ -63,7 +63,6 @@ function main()
         # figure out coordinates of scroll point
         scroll_lon = e.x / width(canvas) * w + west
         scroll_lat = e.y / height(canvas) * h + south
-        @info scroll_lon scroll_lat
 
 
         frac_x = (scroll_lon - west) / w
@@ -87,6 +86,31 @@ function main()
         height_degrees = north - south
 
         draw(canvas, true)
+    end
+
+    # pan by dragging mouse
+    panstart = nothing
+    canvas.mouse.button1press = @guarded (wid, e) -> begin
+        _, east, south, _ = get_canvas_bbox(wid, north, west, height_degrees)
+        w = east - west
+        h = north - south
+        e_lon = e.x / width(canvas) * w + west
+        e_lat = e.y / height(canvas) * h + south
+        panstart = (e_lon, e_lat)
+    end
+
+    canvas.mouse.button1release = @guarded (wid, e) -> begin
+        if !isnothing(panstart)
+            _, east, south, _ = get_canvas_bbox(wid, north, west, height_degrees)
+            w = east - west
+            h = north - south
+            e_lon = e.x / width(canvas) * w + west
+            e_lat = e.y / height(canvas) * h + south
+            west -= e_lon - panstart[1]
+            north += e_lat - panstart[2]
+            panstart = nothing
+            draw(canvas)
+        end
     end
 
     signal_connect(x -> notify(exit_condition), quit_button, :clicked)
