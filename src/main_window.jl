@@ -8,7 +8,13 @@ function main()
     # add toolbar buttons
     open_button = Button("Open")
     quit_button = Button("Quit")
+    origin_button = Button("Set origin")
+    dest_button = Button("Set destination")
+    route_button = Button("Route")
     push!(toolbar, open_button)
+    push!(toolbar, origin_button)
+    push!(toolbar, dest_button)
+    push!(toolbar, route_button)
     push!(toolbar, quit_button)
 
     canvas = Canvas()
@@ -25,17 +31,13 @@ function main()
     # Connect events to buttons
     exit_condition = Condition()
 
-    # graph drawing
-    graph::Union{Nothing, GraphAndMetadata} = nothing
-
     # the viewing area extent is defined by the NE corner and the width in degrees; this way
     # resizing the window zooms the existing view
-    north = 35.913
-    west = -79.057
-    height_degrees = 0.01
+    state = VisualizerState(35.913, -79.057, 0.12, :pan, nothing, nothing, nothing, nothing, nothing)
 
     @guarded draw(canvas) do widget
-        if isnothing(graph)
+        @info "Current state" state
+        if isnothing(state.graph)
             ctx = getgc(canvas)
             h = height(canvas)
             w = width(canvas)
@@ -45,27 +47,41 @@ function main()
             set_source_rgb(ctx, 1, 1, 1)
             fill(ctx)
         else
-            draw_graph(graph, canvas, north, west, height_degrees)
+            draw_graph(canvas, state)
+            base_status = "|V|: $(nv(state.graph.graph))   |E|: $(ne(state.graph.graph))"
+            if !isnothing(state.distance)
+                base_status *= "    Route travel time: $(human_time(state.distance))"
+            end
+            GAccessor.text(status, base_status)
+        end
+    end
+
+    signal_connect(x -> (state.clickmode = :origin), origin_button, :clicked)
+    signal_connect(x -> (state.clickmode = :destination), dest_button, :clicked)
+    signal_connect(route_button, :clicked) do e
+        if !isnothing(state.origin) && !isnothing(state.destination)
+            route!(state)
+            draw(canvas)
         end
     end
 
     canvas.mouse.scroll = @guarded (wid, e) -> begin
         # figure out current extents
-        _, east, south, _ = get_canvas_bbox(wid, north, west, height_degrees)
+        _, east, south, _ = get_canvas_bbox(wid, state)
 
         # shrink or expand bbox around cursor
         # the point under the mouse should remain in exactly the same place
         # while everything else moves around it
         # how far across the screen the mouse is
-        w = east - west
-        h = north - south
+        w = east - state.west
+        h = state.north - south
 
         # figure out coordinates of scroll point
-        scroll_lon = e.x / width(canvas) * w + west
+        scroll_lon = e.x / width(canvas) * w + state.west
         scroll_lat = e.y / height(canvas) * h + south
 
 
-        frac_x = (scroll_lon - west) / w
+        frac_x = (scroll_lon - state.west) / w
         frac_y = (scroll_lat - south) / h
 
         # now, figure out the new bbox
@@ -81,50 +97,58 @@ function main()
         newh = h * frac
 
         south = scroll_lat - newh * frac_y
-        north = south + newh
-        west = scroll_lon - neww * frac_x
-        height_degrees = north - south
+        state.north = south + newh
+        state.west = scroll_lon - neww * frac_x
+        state.height_degrees = state.north - south
 
-        draw(canvas, true)
+        draw(canvas)
     end
 
     # pan by dragging mouse
     panstart = nothing
     canvas.mouse.button1press = @guarded (wid, e) -> begin
-        _, east, south, _ = get_canvas_bbox(wid, north, west, height_degrees)
-        w = east - west
-        h = north - south
-        e_lon = e.x / width(canvas) * w + west
-        e_lat = e.y / height(canvas) * h + south
-        panstart = (e_lon, e_lat)
+        if state.clickmode == :pan
+            _, east, south, _ = get_canvas_bbox(wid, state)
+            w = east - state.west
+            h = state.north - south
+            e_lon = e.x / width(canvas) * w + state.west
+            e_lat = e.y / height(canvas) * h + south
+            panstart = (e_lon, e_lat)
+        end
     end
 
     canvas.mouse.button1release = @guarded (wid, e) -> begin
-        if !isnothing(panstart)
-            _, east, south, _ = get_canvas_bbox(wid, north, west, height_degrees)
-            w = east - west
-            h = north - south
-            e_lon = e.x / width(canvas) * w + west
+        if state.clickmode == :pan && !isnothing(panstart)
+            _, east, south, _ = get_canvas_bbox(wid, state)
+            w = east - state.west
+            h = state.north - south
+            e_lon = e.x / width(canvas) * w + state.west
             e_lat = e.y / height(canvas) * h + south
-            west -= e_lon - panstart[1]
-            north += e_lat - panstart[2]
+            state.west -= e_lon - panstart[1]
+            state.north += e_lat - panstart[2]
             panstart = nothing
-            draw(canvas)
+        elseif state.clickmode == :origin
+            state.origin = node_for_lonlat(lonlat_for_click(wid, e, state)..., state.graph)
+            state.clickmode = :pan
+        elseif state.clickmode == :destination
+            state.destination = node_for_lonlat(lonlat_for_click(wid, e, state)..., state.graph)
+            state.clickmode = :pan
         end
+        draw(canvas)
     end
 
     signal_connect(x -> notify(exit_condition), quit_button, :clicked)
     signal_connect(open_button, :clicked) do s
         file = open_dialog_native("Open graph", window, ("*",))
         set_gtk_property!(window, "title", "StreetRouterVisualizer.jl: $(basename(file))")
-        graph = read_graph(file, window)
+        state.graph = read_graph(file, window)
 
         # zoom so we can see it
         north = -Inf
         west = Inf
         south = Inf
-        for i in 1:nv(graph.graph)
-            geom = get_prop(graph.graph, i, :geom)
+        for i in 1:nv(state.graph.graph)
+            geom = get_prop(state.graph.graph, i, :geom)
             for ll in geom
                 if ll.lat > north
                     north = ll.lat
@@ -140,13 +164,15 @@ function main()
             end
         end
 
-        height_degrees = north - south
+        state.north = north
+        state.west = west
+        state.height_degrees = north - south
 
-        GAccessor.text(status, "$(basename(file))   |V|: $(nv(graph.graph))   |E|: $(ne(graph.graph))")
-
-        draw(canvas, true)
+        draw(canvas)
     end
 
     showall(window)
     wait(exit_condition)
 end
+
+human_time(x) = "$(x ÷ 3600)h $((x % 3600) ÷ 60)m $(x % 60)s"
