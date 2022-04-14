@@ -118,53 +118,123 @@ end
 function get_location_for_vertex(state, vertex)
     geom = get_prop(state.graph.graph, vertex, :geom)
 
-    # offset 10 meters down the line
-    base, idx = get_point_along_line(geom, 20)
+    # offset 10% meters down the line
+    base, idx = get_point_along_line(geom, line_length(geom) * 0.1)
 
     # offset 90 degrees to the right
-    bearing = StreetRouter.OSM.compute_heading(geom[1], get_point_along_line(geom, 30)[1])
-    offset_bearing = StreetRouter.OSM.circular_add(bearing, -90)
+    init_bearing = StreetRouter.OSM.compute_heading(geom[1], base)
 
-    # offset the point
-    offset_latlon(base, offset_bearing, 5 / 111000), idx
+    base, init_bearing
+end 
+
+Luxor.Point(ll::LatLon) = Luxor.Point(ll.lon, ll.lat)
+
+function turn_to_dest(origin, bearing, dest, turn_radius)
+    bearing_to_dest = compute_heading(origin, dest)
+    
+    turn_angle = ((bearing_to_dest - bearing + 180) % 360) - 180
+    
+    if turn_angle < 0
+        # left hand turn to destination
+        arc_center = offset_point(origin, bearing - 90, turn_radius)
+        bearing_center_to_dest = compute_heading(arc_center, dest)
+        dist_to_dest = distance(arc_center, dest)
+        if (dist_to_dest < turn_radius)
+            turn_to_dest(origin, bearing, dest, turn_radius / 2)
+        else
+            bearing_tangent_to_dest = bearing_center_to_dest + acosd(turn_radius / dist_to_dest)
+            # offset to the right of the bearing center to dest
+            tangent_end = offset_point(arc_center, bearing_tangent_to_dest, turn_radius)
+            carc2r(Luxor.Point(arc_center), Luxor.Point(origin), Luxor.Point(tangent_end), :stroke)
+            line(Luxor.Point(tangent_end), Luxor.Point(dest))
+        end
+    else
+        # right hand turn to destination
+        arc_center = offset_point(origin, bearing + 90, turn_radius)
+        bearing_center_to_dest = compute_heading(arc_center, dest)
+        dist_to_dest = distance(arc_center, dest)
+        if (dist_to_dest < turn_radius)
+            turn_to_dest(origin, bearing, dest, turn_radius / 2)
+        else
+            bearing_tangent_to_dest = bearing_center_to_dest - acosd(turn_radius / dist_to_dest)
+            # offset to the right of the bearing center to dest
+            tangent_end = offset_point(arc_center, bearing_tangent_to_dest, turn_radius)
+            carc2r(Luxor.Point(arc_center), Luxor.Point(origin), Luxor.Point(tangent_end), :stroke)
+            line(Luxor.Point(tangent_end), Luxor.Point(dest))
+        end
+    end
 end
 
 function draw_exploded_segment(state, vertex; only_dest=nothing)
-    geom = get_prop(state.graph.graph, vertex, :geom)
-    loc, cutidx = get_location_for_vertex(state, vertex)
+    origin_px, bearing = get_location_for_vertex(state, v)
+    origin_spl = offset_point(origin_px, bearing, 35)
+    line(Luxor.Point(origin_px), Luxor.Point(origin_spl))
+    
+    nbrs = outneighbors(graph, v)
+    
+    for nbr in nbrs
+        dest_px, dbear = get_location_for_vertex(state, nbr)
+        turn_ang = get_prop(graph, v, nbr, :turn_angle)::Float32
 
-    # cut ends off geom
-    startcut, startcutidx = get_point_along_line(geom, 30)
-    endcut, endcutidx = get_point_along_line(geom, line_length(geom) - 30)
-    base_geom = [startcut; geom[startcutidx + 1:endcutidx]; endcut]
-
-    edge_geom = [loc; base_geom]
-    # for (frll, toll) in zip(edge_geom[1:end - 1], edge_geom[2:end])
-    #     line(Luxor.Point(frll.lon, frll.lat), Luxor.Point(toll.lon, toll.lat), :stroke)
-    # end
-
-    # sort the neighbors out by turn angle - left turns first
-    next = outneighbors(state.graph.graph, vertex)
-    sort!(next, by=x -> begin
-            ang = get_prop(state.graph.graph, vertex, x, :turn_angle)
-            ang > 170 ? -190 : ang
-        end)
-
-    # plot them
-    for nbr in next
-        base_geom = offset_geometry(base_geom, -90, 5/111000)
-        if !isnothing(only_dest) && nbr != only_dest
+        if abs(abs(turn_ang % 360) - 180) < 1e-2
             continue
         end
-
-        next_loc, _ = get_location_for_vertex(state, nbr)
-        edge_geom = [loc; base_geom]
-        for (frll, toll) in zip(edge_geom[1:end - 1], edge_geom[2:end])
-            line(Luxor.Point(frll.lon, frll.lat), Luxor.Point(toll.lon, toll.lat), :stroke)
+        
+        # turns go to split slightly further down
+        if abs(turn_ang) > 30
+            dest_px = offset_point(dest_px, dbear, 35)
+        else
+            dest_px = offset_point(dest_px, dbear, 25)
         end
-        frpt = Luxor.Point(base_geom[end].lon, base_geom[end].lat)
-        topt = Luxor.Point(next_loc.lon, next_loc.lat)
-        frpt ≈ topt || Luxor.line(frpt, topt)#; arrowheadlength=3/111000)
+        
+        if abs(turn_ang) < 80
+            offset_ang = 0
+        elseif turn_ang >= 80
+            # right turn, offset turn edge to right
+            offset_ang = 30
+        elseif turn_ang <= -80
+            offset_ang = -30
+        else
+            error("angle not real")
+        end
+        
+        initial_offset = offset_point(origin_spl, bearing + offset_ang, 20 * √2)
+        
+        # line from origin to initial_offset
+        line(Luxor.Point(origin_spl), Luxor.Point(initial_offset), :stroke)
+            
+        # draw parallel for a while
+        dist = euclidean_distance(initial_offset, dest_px)
+        if dist < 60
+            line(Luxor.Point(initial_offset), Luxor.Point(dest_px))
+            # don't lable these tiny segments
+        else
+            # draw a straight segment then a curve
+            if turn_ang < -65
+                # left turn
+                offset_before_curve = dist - 60
+                radius = 30
+            elseif turn_ang > 65
+                # right turn
+                offset_before_curve = dist - 25
+                radius = 15
+            else
+                offset_before_curve = dist - 10
+                radius = 10
+            end
+            final_offset = offset_point(initial_offset, initial_offset, bearing, offset_before_curve)
+            
+            name = way_names[v]
+            traversal_time_rounded = convert(Int32, round(get_prop(graph, v, nbr, :weight)::Float64))
+            
+            if (
+                    origin_px.x > 0 && origin_px.y > 0 && origin_px.x < width && origin_px.y < height ||
+                    dest_px.x > 0 && dest_px.y > 0 && dest_px.x < width && dest_px.y < height
+            )
+                line(Luxor.Point(initial_offset), Luxor.Point(final_offset))
+                turn_to_dest(final_offset, bearing, dest_px, radius)
+            end
+        end
     end
 end
 
