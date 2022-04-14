@@ -58,10 +58,23 @@ function draw_graph(canvas, state::VisualizerState)
     # draw the graph
     # TODO switch to edge-based when zoomed in
     # drawing the non-edge-based graph, draw one path per vertex (which is a street segment)
-    for v in LibSpatialIndex.intersects(state.graph.index, [west, south], [east, north])
-        state.view == :normal && draw_single_segment(state, v)
-        state.view == :turnbased && draw_exploded_segment(state, v)
+    sethue(state.view == :turnbased ? "lightgray" : "black")
+    setline(1)
+
+    # always draw single segments
+    visible_segments = LibSpatialIndex.intersects(state.graph.index, [west, south], [east, north])
+    for v in visible_segments
+        draw_single_segment(state, v)
     end
+
+    sethue("black")
+    if state.view == :turnbased
+        for v in visible_segments
+            draw_exploded_segment(state, v)
+        end
+    end
+
+    Luxor.newpath()
 
     # and the path, if there is one
     if !isnothing(state.path)
@@ -70,6 +83,7 @@ function draw_graph(canvas, state::VisualizerState)
         for (idx, vertex) in enumerate(state.path[1:end - 1])
             state.view == :normal && draw_single_segment(state, vertex)
             state.view == :turnbased && draw_exploded_segment(state, vertex, only_dest=state.path[idx + 1])
+            Luxor.newpath()
         end
     end
 
@@ -101,12 +115,11 @@ function draw_single_segment(state, vertex)
     end
 end
 
-function offset_latlon(ll, heading, distance)
-    pt = Luxor.Point(ll.lon, ll.lat)
-    heading *= cosd(ll.lat)
-    off = polar(distance, (heading - 90) * 2π / 360)
+function offset_point(ll, heading, distance)
+    pt = Luxor.Point(ll.lon * cosd(ll.lat), ll.lat)
+    off = polar(distance / 111000, deg2rad(StreetRouter.OSM.circular_add(-heading, 90)))
     res = pt + off
-    LatLon(res.y, res.x)
+    LatLon(res.y, res.x / cosd(ll.lat))
 end
 
 offset_geometry(geom, bearing, distance) = map(enumerate(geom)) do (idx, pt)
@@ -119,127 +132,102 @@ function get_location_for_vertex(state, vertex)
     geom = get_prop(state.graph.graph, vertex, :geom)
 
     # offset 10% meters down the line
-    base, idx = get_point_along_line(geom, line_length(geom) * 0.1)
+    base, idx = get_point_along_line(geom, 5)
 
-    # offset 90 degrees to the right
     init_bearing = StreetRouter.OSM.compute_heading(geom[1], base)
 
-    base, init_bearing
+    # offset to the right
+    offbase = offset_point(base, StreetRouter.OSM.circular_add(init_bearing, 90), 2)
+
+    offbase, init_bearing
 end 
 
-Luxor.Point(ll::LatLon) = Luxor.Point(ll.lon, ll.lat)
+Luxor.Point(ll::Union{LatLon, LLA}) = Luxor.Point(ll.lon, ll.lat)
+
+function proj_dist(ll1, ll2) 
+    lp1 = Luxor.Point(ll1.lon * cosd(ll1.lat), ll1.lat)
+    lp2 =  Luxor.Point(ll2.lon * cosd(ll2.lat), ll2.lat)
+    distance(lp1, lp2) * 111000
+end
+
 
 function turn_to_dest(origin, bearing, dest, turn_radius)
-    bearing_to_dest = compute_heading(origin, dest)
+    bearing_to_dest = StreetRouter.OSM.compute_heading(origin, dest)
     
-    turn_angle = ((bearing_to_dest - bearing + 180) % 360) - 180
+    turn_angle = StreetRouter.OSM.bearing_between(bearing, bearing_to_dest)
     
-    if turn_angle < 0
+    bearing_to_center = if turn_angle < 0
         # left hand turn to destination
-        arc_center = offset_point(origin, bearing - 90, turn_radius)
-        bearing_center_to_dest = compute_heading(arc_center, dest)
-        dist_to_dest = distance(arc_center, dest)
-        if (dist_to_dest < turn_radius)
-            turn_to_dest(origin, bearing, dest, turn_radius / 2)
-        else
-            bearing_tangent_to_dest = bearing_center_to_dest + acosd(turn_radius / dist_to_dest)
-            # offset to the right of the bearing center to dest
-            tangent_end = offset_point(arc_center, bearing_tangent_to_dest, turn_radius)
-            carc2r(Luxor.Point(arc_center), Luxor.Point(origin), Luxor.Point(tangent_end), :stroke)
-            line(Luxor.Point(tangent_end), Luxor.Point(dest))
-        end
+        StreetRouter.OSM.circular_add(bearing, -90)
     else
-        # right hand turn to destination
-        arc_center = offset_point(origin, bearing + 90, turn_radius)
-        bearing_center_to_dest = compute_heading(arc_center, dest)
-        dist_to_dest = distance(arc_center, dest)
-        if (dist_to_dest < turn_radius)
-            turn_to_dest(origin, bearing, dest, turn_radius / 2)
-        else
-            bearing_tangent_to_dest = bearing_center_to_dest - acosd(turn_radius / dist_to_dest)
-            # offset to the right of the bearing center to dest
-            tangent_end = offset_point(arc_center, bearing_tangent_to_dest, turn_radius)
-            carc2r(Luxor.Point(arc_center), Luxor.Point(origin), Luxor.Point(tangent_end), :stroke)
-            line(Luxor.Point(tangent_end), Luxor.Point(dest))
-        end
+        StreetRouter.OSM.circular_add(bearing, +90)
+    end
+
+    arc_center = offset_point(origin, bearing_to_center, turn_radius)
+
+    bearing_center_to_dest = StreetRouter.OSM.compute_heading(arc_center, dest)
+    dist_to_dest = proj_dist(arc_center, dest)
+    if (dist_to_dest < turn_radius)
+        turn_to_dest(origin, bearing, dest, turn_radius / 2)
+    else
+        ang = acosd(turn_radius / dist_to_dest)
+        bearing_tangent_to_dest = bearing_center_to_dest + ang
+        # offset to the right of the bearing center to dest
+        tangent_end = offset_point(arc_center, bearing_tangent_to_dest, turn_radius)
+        # if turn_angle < 0
+        #     # left turn, counterclockwise arc
+        #     arc2r(Luxor.Point(arc_center), Luxor.Point(origin), Luxor.Point(tangent_end), :stroke)
+        # else
+        #     carc2r(Luxor.Point(arc_center), Luxor.Point(origin), Luxor.Point(tangent_end), :stroke)
+        # end
+        line(Luxor.Point(origin), Luxor.Point(tangent_end), :stroke)
+        # line(Luxor.Point(arc_center), Luxor.Point(tangent_end))
+        line(Luxor.Point(tangent_end), Luxor.Point(dest), :stroke)
     end
 end
 
 function draw_exploded_segment(state, vertex; only_dest=nothing)
-    origin_px, bearing = get_location_for_vertex(state, v)
-    origin_spl = offset_point(origin_px, bearing, 35)
-    line(Luxor.Point(origin_px), Luxor.Point(origin_spl))
+    geom = get_prop(state.graph.graph, vertex, :geom)
+    origin_spl, bearing = get_location_for_vertex(state, vertex)
     
-    nbrs = outneighbors(graph, v)
-    
-    for nbr in nbrs
-        dest_px, dbear = get_location_for_vertex(state, nbr)
-        turn_ang = get_prop(graph, v, nbr, :turn_angle)::Float32
+    nbrs = outneighbors(state.graph.graph,  vertex)
 
-        if abs(abs(turn_ang % 360) - 180) < 1e-2
+    # sort l to r
+    sort!(nbrs, by=nbr -> begin
+        ang = get_prop(state.graph.graph, vertex, nbr, :turn_angle)
+        # treat U turns as left turns
+        ang > 170 ? -180 : ang
+    end)
+
+    off_angles = length(nbrs) > 1 ? range(-30, 30, length(nbrs)) : zeros(length(nbrs))
+    
+    for (nbr, offset_ang) in zip(nbrs, off_angles)
+        if !isnothing(only_dest) && only_dest != nbr
             continue
         end
+
+        dest_px, dbear = get_location_for_vertex(state, nbr)
+        turn_ang = get_prop(state.graph.graph, vertex, nbr, :turn_angle)
         
-        # turns go to split slightly further down
-        if abs(turn_ang) > 30
-            dest_px = offset_point(dest_px, dbear, 35)
-        else
-            dest_px = offset_point(dest_px, dbear, 25)
-        end
-        
-        if abs(turn_ang) < 80
-            offset_ang = 0
-        elseif turn_ang >= 80
-            # right turn, offset turn edge to right
-            offset_ang = 30
-        elseif turn_ang <= -80
-            offset_ang = -30
-        else
-            error("angle not real")
-        end
-        
-        initial_offset = offset_point(origin_spl, bearing + offset_ang, 20 * √2)
+        initial_offset = offset_point(origin_spl, bearing + offset_ang, 3)
         
         # line from origin to initial_offset
         line(Luxor.Point(origin_spl), Luxor.Point(initial_offset), :stroke)
             
         # draw parallel for a while
-        dist = euclidean_distance(initial_offset, dest_px)
-        if dist < 60
-            line(Luxor.Point(initial_offset), Luxor.Point(dest_px))
-            # don't lable these tiny segments
-        else
-            # draw a straight segment then a curve
-            if turn_ang < -65
-                # left turn
-                offset_before_curve = dist - 60
-                radius = 30
-            elseif turn_ang > 65
-                # right turn
-                offset_before_curve = dist - 25
-                radius = 15
-            else
-                offset_before_curve = dist - 10
-                radius = 10
-            end
-            final_offset = offset_point(initial_offset, initial_offset, bearing, offset_before_curve)
-            
-            name = way_names[v]
-            traversal_time_rounded = convert(Int32, round(get_prop(graph, v, nbr, :weight)::Float64))
-            
-            if (
-                    origin_px.x > 0 && origin_px.y > 0 && origin_px.x < width && origin_px.y < height ||
-                    dest_px.x > 0 && dest_px.y > 0 && dest_px.x < width && dest_px.y < height
-            )
-                line(Luxor.Point(initial_offset), Luxor.Point(final_offset))
-                turn_to_dest(final_offset, bearing, dest_px, radius)
-            end
-        end
+        dist = euclidean_distance(initial_offset, geom[end])
+        
+        bearing = StreetRouter.OSM.compute_heading(geom[1], geom[end])
+        final_offset = offset_point(initial_offset, bearing, dist - 5)
+                    
+        line(Luxor.Point(initial_offset), Luxor.Point(final_offset), :stroke)
+        bearing = StreetRouter.OSM.compute_heading(initial_offset, final_offset)
+        #turn_to_dest(final_offset, bearing, dest_px, radius)
+        line(Luxor.Point(final_offset), Luxor.Point(dest_px), :stroke)
     end
 end
 
 line_length(geom) = sum(euclidean_distance.(geom[1:end-1], geom[2:end]))
-
 
 function get_point_along_line(geom, distance)
     # loop over geom, accumulating distances

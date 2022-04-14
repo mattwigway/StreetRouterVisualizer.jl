@@ -69,9 +69,14 @@ function main()
             draw(canvas)
         end
     end
-    signal_connect(x -> state.view = :normal, normal_button, :clicked)
-    signal_connect(x -> state.view = :turnbased, turn_button, :clicked)
-
+    signal_connect(x -> begin
+        state.view = :normal
+        draw(canvas)
+    end, normal_button, :clicked)
+    signal_connect(x -> begin
+        state.view = :turnbased
+        draw(canvas)
+    end, turn_button, :clicked)
 
     canvas.mouse.scroll = @guarded (wid, e) -> begin
         # figure out current extents
