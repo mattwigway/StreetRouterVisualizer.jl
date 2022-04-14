@@ -37,6 +37,7 @@ function main()
 
     @guarded draw(canvas) do widget
         @info "Current state" state
+        Revise.revise() # DEVELOPMENT: reload code on each draw
         if isnothing(state.graph)
             ctx = getgc(canvas)
             h = height(canvas)
