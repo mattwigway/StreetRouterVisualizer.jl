@@ -11,10 +11,14 @@ function main()
     origin_button = Button("Set origin")
     dest_button = Button("Set destination")
     route_button = Button("Route")
+    normal_button = Button("Normal view")
+    turn_button = Button("Turn-based view")
     push!(toolbar, open_button)
     push!(toolbar, origin_button)
     push!(toolbar, dest_button)
     push!(toolbar, route_button)
+    push!(toolbar, normal_button)
+    push!(toolbar, turn_button)
     push!(toolbar, quit_button)
 
     canvas = Canvas()
@@ -33,7 +37,7 @@ function main()
 
     # the viewing area extent is defined by the NE corner and the width in degrees; this way
     # resizing the window zooms the existing view
-    state = VisualizerState(35.913, -79.057, 0.12, :pan, nothing, nothing, nothing, nothing, nothing)
+    state = VisualizerState(35.913, -79.057, 0.12, :pan, :normal, nothing, nothing, nothing, nothing, nothing)
 
     @guarded draw(canvas) do widget
         @info "Current state" state
@@ -65,6 +69,9 @@ function main()
             draw(canvas)
         end
     end
+    signal_connect(x -> state.view = :normal, normal_button, :clicked)
+    signal_connect(x -> state.view = :turnbased, turn_button, :clicked)
+
 
     canvas.mouse.scroll = @guarded (wid, e) -> begin
         # figure out current extents

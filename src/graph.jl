@@ -1,4 +1,5 @@
 const ROUTE_COLOR="red"
+const BEARING_DISTANCE = 15
 
 function read_graph(filename, window)
     G = deserialize(filename)
@@ -56,7 +57,21 @@ function draw_graph(canvas, state::VisualizerState)
     
     # draw the graph
     # TODO switch to edge-based when zoomed in
-    draw_normal(drawing, state, north, east, south, west)
+    # drawing the non-edge-based graph, draw one path per vertex (which is a street segment)
+    for v in LibSpatialIndex.intersects(state.graph.index, [west, south], [east, north])
+        state.view == :normal && draw_single_segment(state, v)
+        state.view == :turnbased && draw_exploded_segment(state, v)
+    end
+
+    # and the path, if there is one
+    if !isnothing(state.path)
+        sethue(ROUTE_COLOR)
+        setline(2)
+        for (idx, vertex) in enumerate(state.path[1:end - 1])
+            state.view == :normal && draw_single_segment(state, vertex)
+            state.view == :turnbased && draw_exploded_segment(state, vertex, only_dest=state.path[idx + 1])
+        end
+    end
 
     # draw the origin and destination
     node_radius_degrees = 10 / h * state.height_degrees
@@ -75,24 +90,8 @@ function draw_node(graph, node, color, radius)
     Luxor.circle(geom[1].lon, geom[1].lat, radius, :fill)
 end
 
-"Draw a normal graph (i.e. no turn edges)"
-function draw_normal(drawing, state, north, east, south, west)
-    # drawing the non-edge-based graph, draw one path per vertex (which is a street segment)
-    for v in LibSpatialIndex.intersects(state.graph.index, [west, south], [east, north])
-        draw_single_edge(state, v)
-    end
-
-    # and the path, if there is one
-    if !isnothing(state.path)
-        sethue(ROUTE_COLOR)
-        setline(2)
-        for vertex in state.path[1:end - 1]
-            draw_single_edge(state, vertex)
-        end
-    end
-end
-
-function draw_single_edge(state, vertex)
+# draw a single road segment (reprsented by a vertex)
+function draw_single_segment(state, vertex)
     geom = get_prop(state.graph.graph, vertex, :geom)
 
     if length(geom) ≥ 2
@@ -102,64 +101,97 @@ function draw_single_edge(state, vertex)
     end
 end
 
-
-function cruft()
-    
-
-
-    # set the user coordinates to match spatial coordinates
-    set_coordinates(ctx, BoundingBox(state.west, east, state.north, south))
-
-    # just paint it white
-    rectangle(ctx, state.west, south, east - state.west, state.north - south)
-    set_source_rgb(ctx, 1, 1, 1)
-    fill(ctx)
-
-    set_source_rgb(ctx, 0, 0, 0)
-
-    # find all edges that intersect
-    for v in LibSpatialIndex.intersects(state.graph.index, [state.west, south], [east, state.north])
-        geom = get_prop(state.graph.graph, v, :geom)
-
-        if length(geom) ≥ 2
-        # draw the geom
-            move_to(ctx, geom[1].lon, geom[1].lat)
-            for ll in geom[2:end]
-                line_to(ctx, ll.lon, ll.lat)
-            end
-            stroke(ctx)
-        end
-    end
-
-    # draw the path
-    if !isnothing(state.path)
-        for (v1, v2) in zip(state.path[1:end - 1], state.path[2:end])
-            draw_edge(ctx, state.graph, v1, v2, (1, 0, 0))
-        end
-    end
-
-    # draw the origin and destination
-    node_radius_degrees = 10 / h * state.height_degrees
-    !isnothing(state.origin) && draw_node(ctx, state.graph, state.origin, (0, 0, 1), node_radius_degrees)
-    !isnothing(state.destination) && draw_node(ctx, state.graph, state.destination, (1, 0, 0), node_radius_degrees)
+function offset_latlon(ll, heading, distance)
+    pt = Luxor.Point(ll.lon, ll.lat)
+    heading *= cosd(ll.lat)
+    off = polar(distance, (heading - 90) * 2π / 360)
+    res = pt + off
+    LatLon(res.y, res.x)
 end
 
+offset_geometry(geom, bearing, distance) = map(enumerate(geom)) do (idx, pt)
+    current_heading = StreetRouter.OSM.compute_heading(geom[max(idx - 1, 1)], geom[min(idx + 1, length(geom))])
+    offset_heading = StreetRouter.OSM.circular_add(current_heading, bearing)
+    offset_latlon(pt, offset_heading, distance)
+end
 
+function get_location_for_vertex(state, vertex)
+    geom = get_prop(state.graph.graph, vertex, :geom)
 
-function draw_edge(ctx, graph, frnode, tonode, color)
-    set_source_rgb(ctx, color...)
-    geom = get_prop(graph.graph, frnode, :geom)
+    # offset 10 meters down the line
+    base, idx = get_point_along_line(geom, 20)
 
-    @info "geom" geom
+    # offset 90 degrees to the right
+    bearing = StreetRouter.OSM.compute_heading(geom[1], get_point_along_line(geom, 30)[1])
+    offset_bearing = StreetRouter.OSM.circular_add(bearing, -90)
 
-    if length(geom) ≥ 2
-        # draw the geom
-        move_to(ctx, geom[1].lon, geom[1].lat)
-        for ll in geom[2:end]
-            line_to(ctx, ll.lon, ll.lat)
+    # offset the point
+    offset_latlon(base, offset_bearing, 5 / 111000), idx
+end
+
+function draw_exploded_segment(state, vertex; only_dest=nothing)
+    geom = get_prop(state.graph.graph, vertex, :geom)
+    loc, cutidx = get_location_for_vertex(state, vertex)
+
+    # cut ends off geom
+    startcut, startcutidx = get_point_along_line(geom, 30)
+    endcut, endcutidx = get_point_along_line(geom, line_length(geom) - 30)
+    base_geom = [startcut; geom[startcutidx + 1:endcutidx]; endcut]
+
+    edge_geom = [loc; base_geom]
+    # for (frll, toll) in zip(edge_geom[1:end - 1], edge_geom[2:end])
+    #     line(Luxor.Point(frll.lon, frll.lat), Luxor.Point(toll.lon, toll.lat), :stroke)
+    # end
+
+    # sort the neighbors out by turn angle - left turns first
+    next = outneighbors(state.graph.graph, vertex)
+    sort!(next, by=x -> begin
+            ang = get_prop(state.graph.graph, vertex, x, :turn_angle)
+            ang > 170 ? -190 : ang
+        end)
+
+    # plot them
+    for nbr in next
+        base_geom = offset_geometry(base_geom, -90, 5/111000)
+        if !isnothing(only_dest) && nbr != only_dest
+            continue
         end
-        stroke(ctx)
+
+        next_loc, _ = get_location_for_vertex(state, nbr)
+        edge_geom = [loc; base_geom]
+        for (frll, toll) in zip(edge_geom[1:end - 1], edge_geom[2:end])
+            line(Luxor.Point(frll.lon, frll.lat), Luxor.Point(toll.lon, toll.lat), :stroke)
+        end
+        frpt = Luxor.Point(base_geom[end].lon, base_geom[end].lat)
+        topt = Luxor.Point(next_loc.lon, next_loc.lat)
+        frpt ≈ topt || Luxor.line(frpt, topt)#; arrowheadlength=3/111000)
     end
+end
+
+line_length(geom) = sum(euclidean_distance.(geom[1:end-1], geom[2:end]))
+
+
+function get_point_along_line(geom, distance)
+    # loop over geom, accumulating distances
+    dist = 0.0
+    
+    for i in 2:length(geom)
+        seg_dist = euclidean_distance(geom[i-1], geom[i])
+        if dist + seg_dist > distance
+            seg_frac = (distance - dist) / seg_dist
+            # generate the midpoint
+            return (
+                LatLon(
+                    geom[i - 1].lat + (geom[i].lat - geom[i - 1].lat) * seg_frac,
+                    geom[i - 1].lon + (geom[i].lon - geom[i - 1].lon) * seg_frac,
+                ),
+                i
+            )
+        end
+    end
+
+    # if we haven't returned by here, return endpoint
+    geom[end], length(geom) - 1
 end
 
 function route!(state)
