@@ -8,10 +8,12 @@ mutable struct VisualizerState
     north::Float64
     height_degrees::Float64
     clickmode::Symbol
+    colormode::Symbol
     view::Symbol
     origin::Union{Int64, Nothing}
     destination::Union{Int64, Nothing}
     path::Union{Vector{Int64}, Nothing}
     distance::Union{Float64, Nothing}
     graph::Union{GraphAndMetadata, Nothing}
+    graphpath::Union{Nothing, String}
 end

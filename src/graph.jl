@@ -1,5 +1,6 @@
 const ROUTE_COLOR="red"
 const BEARING_DISTANCE = 15
+const TURN_COLORS = collect(keys(filter(x -> sum(x[2]) < 128*3, pairs(Colors.color_names))))
 
 function read_graph(filename, window)
     G = deserialize(filename)
@@ -186,11 +187,24 @@ function turn_to_dest(origin, bearing, dest, turn_radius)
     end
 end
 
+# give each restriction allowed path a unique color. since nearby restrictions
+# in same system likely to have adjacent IDs, this should give unique colors for
+# most restrictions
+hue_for_restriction(restriction_id) = TURN_COLORS[restriction_id % length(TURN_COLORS) + 1]
+
 function draw_exploded_segment(state, vertex; only_dest=nothing)
+    if has_prop(state.graph.graph, vertex, :system_idx)
+        # short circuit, draw point to point
+        draw_turn(state, vertex, only_dest)
+        return
+    end
+
     geom = get_prop(state.graph.graph, vertex, :geom)
     origin_spl, bearing = get_location_for_vertex(state, vertex)
     
-    nbrs = outneighbors(state.graph.graph,  vertex)
+    nbrs = outneighbors(state.graph.graph, vertex)
+    # if the outneighbors connect to a turn system, will be handled by draw_turn
+    filter!(x -> !has_prop(state.graph.graph, x, :system_idx), nbrs)
 
     # sort l to r
     sort!(nbrs, by=nbr -> begin
@@ -225,6 +239,58 @@ function draw_exploded_segment(state, vertex; only_dest=nothing)
         #turn_to_dest(final_offset, bearing, dest_px, radius)
         line(Luxor.Point(final_offset), Luxor.Point(dest_px), :stroke)
     end
+end
+
+function draw_turn(state, vertex, only_dest)
+    # otherwise, only draw the turn if this vertex is the start of the turn
+    for nbr in inneighbors(state.graph.graph, vertex)
+        if has_prop(state.graph.graph, nbr, :complex_restriction_idx)
+            return
+        end
+    end
+
+    # find the end of the turn
+    current_v = vertex
+    count = 1
+    while true
+        found_next = false
+        for nbr in outneighbors(state.graph.graph, current_v)
+            if has_prop(state.graph.graph, nbr, :complex_restriction_idx)
+                current_v = nbr
+                found_next = true
+                count += 1
+                break
+            end
+        end
+        if !found_next
+            break
+        end
+    end
+
+    innbrs = inneighbors(state.graph.graph, vertex)
+    @assert length(innbrs) == 1
+    outnbrs = outneighbors(state.graph.graph, current_v)
+    @assert length(outnbrs) == 1
+
+    # get the color for the turn
+    oldhue = Luxor.get_current_hue()
+    Luxor.newpath()
+    hue_idx = get_prop(state.graph.graph, vertex, state.colormode == :turn ? :complex_restriction_idx : :system_idx)
+    hue = hue_for_restriction(hue_idx)
+    sethue(isnothing(only_dest) ? hue : ROUTE_COLOR)
+
+    frv, fang = get_location_for_vertex(state, innbrs[1])
+    tov, toang = get_location_for_vertex(state, outnbrs[1])
+    cp1 = offset_point(frv, fang, euclidean_distance(frv, tov) * 0.1)
+    cp2 = offset_point(tov, StreetRouter.OSM.circular_add(toang, 180), euclidean_distance(frv, tov) * 0.1)
+
+    move(Luxor.Point(frv))
+    curve(Luxor.Point.([cp1, cp2, tov])...)
+    #line(Luxor.Point(tov))
+
+    Luxor.strokepath()
+    Luxor.newpath()
+    sethue(oldhue)
 end
 
 line_length(geom) = sum(euclidean_distance.(geom[1:end-1], geom[2:end]))
@@ -270,3 +336,4 @@ function lonlat_for_click(canvas, e, state)
 end
 
 node_for_lonlat(lon, lat, G) = LibSpatialIndex.knn(G.index, [lon, lat], 1)[1]
+

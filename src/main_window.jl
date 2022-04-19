@@ -7,18 +7,25 @@ function main()
 
     # add toolbar buttons
     open_button = Button("Open")
-    quit_button = Button("Quit")
+    reload_button = Button("Reload")
     origin_button = Button("Set origin")
     dest_button = Button("Set destination")
     route_button = Button("Route")
     normal_button = Button("Normal view")
     turn_button = Button("Turn-based view")
+    color_by_turn_button = Button("Color by turn")
+    color_by_system_button = Button("Color by turn system")
+    quit_button = Button("Quit")
+
     push!(toolbar, open_button)
+    push!(toolbar, reload_button)
     push!(toolbar, origin_button)
     push!(toolbar, dest_button)
     push!(toolbar, route_button)
     push!(toolbar, normal_button)
     push!(toolbar, turn_button)
+    push!(toolbar, color_by_turn_button)
+    push!(toolbar, color_by_system_button)
     push!(toolbar, quit_button)
 
     canvas = Canvas()
@@ -37,7 +44,7 @@ function main()
 
     # the viewing area extent is defined by the NE corner and the width in degrees; this way
     # resizing the window zooms the existing view
-    state = VisualizerState(35.913, -79.057, 0.12, :pan, :normal, nothing, nothing, nothing, nothing, nothing)
+    state = VisualizerState(35.913, -79.057, 0.12, :pan, :turn, :normal, nothing, nothing, nothing, nothing, nothing, nothing)
 
     @guarded draw(canvas) do widget
         @info "Current state" state
@@ -154,6 +161,7 @@ function main()
     signal_connect(open_button, :clicked) do s
         file = open_dialog_native("Open graph", window, ("*",))
         set_gtk_property!(window, "title", "StreetRouterVisualizer.jl: $(basename(file))")
+        state.graphpath = file
         state.graph = read_graph(file, window)
 
         # zoom so we can see it
@@ -181,6 +189,21 @@ function main()
         state.west = west
         state.height_degrees = north - south
 
+        draw(canvas)
+    end
+
+    signal_connect(reload_button, :clicked) do s
+        state.graph = read_graph(state.graphpath, window)
+        draw(canvas)
+    end
+
+    signal_connect(color_by_turn_button, :clicked) do _
+        state.colormode = :turn
+        draw(canvas)
+    end
+
+    signal_connect(color_by_system_button, :clicked) do _
+        state.colormode = :system
         draw(canvas)
     end
 
