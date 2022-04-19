@@ -10,22 +10,28 @@ function main()
     reload_button = Button("Reload")
     origin_button = Button("Set origin")
     dest_button = Button("Set destination")
+    spt_step_button = Button("Step SPT")
     route_button = Button("Route")
     normal_button = Button("Normal view")
     turn_button = Button("Turn-based view")
+    vertex_label_button = Button("Toggle vertex labels")
     color_by_turn_button = Button("Color by turn")
     color_by_system_button = Button("Color by turn system")
+    infiltrate_button = Button("Infiltrate")
     quit_button = Button("Quit")
 
     push!(toolbar, open_button)
     push!(toolbar, reload_button)
     push!(toolbar, origin_button)
     push!(toolbar, dest_button)
+    push!(toolbar, spt_step_button)
     push!(toolbar, route_button)
     push!(toolbar, normal_button)
     push!(toolbar, turn_button)
+    push!(toolbar, vertex_label_button)
     push!(toolbar, color_by_turn_button)
     push!(toolbar, color_by_system_button)
+    push!(toolbar, infiltrate_button)
     push!(toolbar, quit_button)
 
     canvas = Canvas()
@@ -44,7 +50,7 @@ function main()
 
     # the viewing area extent is defined by the NE corner and the width in degrees; this way
     # resizing the window zooms the existing view
-    state = VisualizerState(35.913, -79.057, 0.12, :pan, :turn, :normal, nothing, nothing, nothing, nothing, nothing, nothing)
+    state = VisualizerState(35.913, -79.057, 0.12, :pan, :turn, :normal, false, nothing, nothing, nothing, nothing, nothing, nothing, Set{Int64}())
 
     @guarded draw(canvas) do widget
         @info "Current state" state
@@ -148,10 +154,11 @@ function main()
             state.north += e_lat - panstart[2]
             panstart = nothing
         elseif state.clickmode == :origin
-            state.origin = node_for_lonlat(lonlat_for_click(wid, e, state)..., state.graph)
+            state.origin = node_for_lonlat(lonlat_for_click(wid, e, state)..., state)
             state.clickmode = :pan
+            empty!(state.spt)
         elseif state.clickmode == :destination
-            state.destination = node_for_lonlat(lonlat_for_click(wid, e, state)..., state.graph)
+            state.destination = node_for_lonlat(lonlat_for_click(wid, e, state)..., state)
             state.clickmode = :pan
         end
         draw(canvas)
@@ -205,6 +212,23 @@ function main()
     signal_connect(color_by_system_button, :clicked) do _
         state.colormode = :system
         draw(canvas)
+    end
+
+    signal_connect(spt_step_button, :clicked) do _
+        update_spt(state)
+        draw(canvas)
+    end
+
+    signal_connect(vertex_label_button, :clicked) do _
+        state.vertexlabels = !state.vertexlabels
+        draw(canvas)
+    end
+
+    signal_connect(infiltrate_button, :clicked) do _
+        @async begin
+            G = state.graph.graph
+            @infiltrate
+        end
     end
 
     showall(window)

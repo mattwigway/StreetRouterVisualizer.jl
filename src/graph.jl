@@ -1,11 +1,15 @@
 const ROUTE_COLOR="red"
 const BEARING_DISTANCE = 15
-const TURN_COLORS = collect(keys(filter(x -> sum(x[2]) < 128*3, pairs(Colors.color_names))))
+# avoid light and grayish colors
+const TURN_COLORS = collect(keys(filter(x -> sum(x[2]) < 128*3 && entropy(x[2] ./ 255, 3) < 0.9, pairs(Colors.color_names))))
+const SPT_COLOR = "blue"
 
 function read_graph(filename, window)
     G = deserialize(filename)
 
     StreetRouter.compute_freeflow_weights!(G)
+
+    @info "nbrs" outneighbors(G, 53626)
 
     # build a spatial index
     # note that geoms are attached to _vertices as this is an edge-based graph
@@ -40,7 +44,6 @@ function draw_graph(canvas, state::VisualizerState)
     sethue("black")
     setline(1)
 
-
     # figure out the south and west corners
     # the width is figured based on height in degrees per pixel divided by teh cosine of latitude
     # to correct for degrees of longitude getting smaller near the poles
@@ -65,13 +68,21 @@ function draw_graph(canvas, state::VisualizerState)
     # always draw single segments
     visible_segments = LibSpatialIndex.intersects(state.graph.index, [west, south], [east, north])
     for v in visible_segments
+        if state.view == :normal && v ∈ state.spt
+            sethue(SPT_COLOR)
+        end
         draw_single_segment(state, v)
+        sethue(state.view == :turnbased ? "lightgray" : "black")
     end
 
     sethue("black")
     if state.view == :turnbased
         for v in visible_segments
+            if v ∈ state.spt
+                sethue(SPT_COLOR)
+            end
             draw_exploded_segment(state, v)
+            sethue("black")
         end
     end
 
@@ -90,8 +101,8 @@ function draw_graph(canvas, state::VisualizerState)
 
     # draw the origin and destination
     node_radius_degrees = 10 / h * state.height_degrees
-    !isnothing(state.origin) && draw_node(state.graph, state.origin, (0, 0, 1), node_radius_degrees)
-    !isnothing(state.destination) && draw_node(state.graph, state.destination, (1, 0, 0), node_radius_degrees)
+    !isnothing(state.origin) && draw_node(state, state.origin, (0, 0, 1), node_radius_degrees)
+    !isnothing(state.destination) && draw_node(state, state.destination, (1, 0, 0), node_radius_degrees)
 
     # paint onto canvas
     # https://github.com/nodrygo/GtkLuxorNaiveDem
@@ -99,10 +110,14 @@ function draw_graph(canvas, state::VisualizerState)
     Cairo.paint(ctx)
 end
 
-function draw_node(graph, node, color, radius)
+function draw_node(state, node, color, radius)
     sethue(color)
-    geom = get_prop(graph.graph, node, :geom)
-    Luxor.circle(geom[1].lon, geom[1].lat, radius, :fill)
+    if state.view == :normal
+        geom = get_prop(state.graph.graph, node, :geom)[1]
+    else
+        geom = get_location_for_vertex(state, node)[1]
+    end
+    Luxor.ellipse(geom.lon, geom.lat, radius / cosd(geom.lat), radius, :fill)
 end
 
 # draw a single road segment (reprsented by a vertex)
@@ -202,7 +217,7 @@ function draw_exploded_segment(state, vertex; only_dest=nothing)
     geom = get_prop(state.graph.graph, vertex, :geom)
     origin_spl, bearing = get_location_for_vertex(state, vertex)
     
-    nbrs = outneighbors(state.graph.graph, vertex)
+    nbrs = copy(outneighbors(state.graph.graph, vertex))
     # if the outneighbors connect to a turn system, will be handled by draw_turn
     filter!(x -> !has_prop(state.graph.graph, x, :system_idx), nbrs)
 
@@ -239,6 +254,13 @@ function draw_exploded_segment(state, vertex; only_dest=nothing)
         #turn_to_dest(final_offset, bearing, dest_px, radius)
         line(Luxor.Point(final_offset), Luxor.Point(dest_px), :stroke)
     end
+
+    if state.vertexlabels
+        Luxor.scale(1, -1)
+        fontsize(abs(state.height_degrees / 50))
+        text("$vertex", origin_spl.lon, -origin_spl.lat, halign=:center)
+        Luxor.scale(1, -1)
+    end
 end
 
 function draw_turn(state, vertex, only_dest)
@@ -250,6 +272,7 @@ function draw_turn(state, vertex, only_dest)
     end
 
     # find the end of the turn
+    vertices = [vertex]
     current_v = vertex
     count = 1
     while true
@@ -257,6 +280,7 @@ function draw_turn(state, vertex, only_dest)
         for nbr in outneighbors(state.graph.graph, current_v)
             if has_prop(state.graph.graph, nbr, :complex_restriction_idx)
                 current_v = nbr
+                push!(vertices, current_v)
                 found_next = true
                 count += 1
                 break
@@ -275,9 +299,15 @@ function draw_turn(state, vertex, only_dest)
     # get the color for the turn
     oldhue = Luxor.get_current_hue()
     Luxor.newpath()
-    hue_idx = get_prop(state.graph.graph, vertex, state.colormode == :turn ? :complex_restriction_idx : :system_idx)
-    hue = hue_for_restriction(hue_idx)
-    sethue(isnothing(only_dest) ? hue : ROUTE_COLOR)
+    hue = if !isnothing(only_dest)
+        ROUTE_COLOR
+    elseif vertex ∈ state.spt
+        SPT_COLOR
+    else
+        hue_idx = get_prop(state.graph.graph, vertex, state.colormode == :turn ? :complex_restriction_idx : :system_idx)
+        hue_for_restriction(hue_idx)
+    end
+    sethue(hue)
 
     frv, fang = get_location_for_vertex(state, innbrs[1])
     tov, toang = get_location_for_vertex(state, outnbrs[1])
@@ -290,6 +320,16 @@ function draw_turn(state, vertex, only_dest)
 
     Luxor.strokepath()
     Luxor.newpath()
+
+    if state.vertexlabels
+        fontsize(state.height_degrees / 50)
+        label = join(vertices, ", ")
+        mp = midpoint(Luxor.Point(frv), Luxor.Point(cp1))
+        Luxor.scale(1, -1)
+        text(label, mp.x, -mp.y, halign=:left)
+        Luxor.scale(1, -1)
+    end
+
     sethue(oldhue)
 end
 
@@ -335,5 +375,13 @@ function lonlat_for_click(canvas, e, state)
     e_lon, e_lat
 end
 
-node_for_lonlat(lon, lat, G) = LibSpatialIndex.knn(G.index, [lon, lat], 1)[1]
+function node_for_lonlat(lon, lat, state; ϵ = 0.001)
+    candidates = LibSpatialIndex.intersects(state.graph.index, [lon - ϵ / cosd(lat), lat - ϵ], [lon + ϵ / cosd(lat), lat + ϵ])
+    if isempty(candidates)
+        # expanding env search
+        return node_for_lonlat(lon, lat, state, ϵ=2ϵ)
+    end
+    distances = map(c -> euclidean_distance(LatLon(lat, lon), get_location_for_vertex(state, c)[1]), candidates)
+    candidates[argmin(distances)]
+end
 

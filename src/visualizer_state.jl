@@ -10,10 +10,12 @@ mutable struct VisualizerState
     clickmode::Symbol
     colormode::Symbol
     view::Symbol
+    vertexlabels::Bool
     origin::Union{Int64, Nothing}
     destination::Union{Int64, Nothing}
     path::Union{Vector{Int64}, Nothing}
     distance::Union{Float64, Nothing}
     graph::Union{GraphAndMetadata, Nothing}
     graphpath::Union{Nothing, String}
+    spt::Set{Int64}
 end
