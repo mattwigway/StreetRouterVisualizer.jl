@@ -17,7 +17,10 @@ function main()
     vertex_label_button = Button("Toggle vertex labels")
     color_by_turn_button = Button("Color by turn")
     color_by_system_button = Button("Color by turn system")
-    infiltrate_button = Button("Infiltrate")
+    color_by_strong_component_button = Button("Color by strong component")
+    find_vertex_entry = GtkEntry()
+    find_vertex_button = Button("Find vertex")
+    topo_button = Button("Show topology")
     quit_button = Button("Quit")
 
     push!(toolbar, open_button)
@@ -31,7 +34,10 @@ function main()
     push!(toolbar, vertex_label_button)
     push!(toolbar, color_by_turn_button)
     push!(toolbar, color_by_system_button)
-    push!(toolbar, infiltrate_button)
+    push!(toolbar, color_by_strong_component_button)
+    push!(toolbar, find_vertex_entry)
+    push!(toolbar, find_vertex_button)
+    push!(toolbar, topo_button)
     push!(toolbar, quit_button)
 
     canvas = Canvas()
@@ -224,11 +230,51 @@ function main()
         draw(canvas)
     end
 
-    signal_connect(infiltrate_button, :clicked) do _
-        @async begin
-            G = state.graph.graph
-            @infiltrate
+    signal_connect(find_vertex_button, :clicked) do _
+        v = parse(Int64, get_gtk_property(find_vertex_entry, :text, String))
+        north = -Inf
+        south = Inf
+        west = Inf
+        geom = get_prop(state.graph.graph, v, :geom)
+        for ll in geom
+            if ll.lat > north
+                north = ll.lat
+            end
+
+            if ll.lat < south
+                south = ll.lat
+            end
+
+            if ll.lon < west
+                west = ll.lon
+            end
         end
+
+        state.west = west
+        state.north = north
+        state.height_degrees = north - south
+
+        draw(canvas)
+    end
+
+    signal_connect(topo_button, :clicked) do _
+        north, east, south, west = get_canvas_bbox(canvas, state)
+        vertices = LibSpatialIndex.intersects(state.graph.index, [west, south], [east, north])
+        topological_view(state, vertices, window)
+    end
+
+    signal_connect(color_by_strong_component_button, :clicked) do _
+        if isempty(state.graph.strong_components)
+            # find strong components
+            for (i, component) in enumerate(strongly_connected_components(state.graph.graph))
+                for v in component
+                    state.graph.strong_components[v] = i
+                end
+            end
+        end
+
+        state.colormode = :strong_components
+        draw(canvas)
     end
 
     showall(window)

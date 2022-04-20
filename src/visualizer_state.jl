@@ -1,6 +1,7 @@
 struct GraphAndMetadata
     graph::AbstractGraph
     index::LibSpatialIndex.RTree
+    strong_components::Union{Nothing, Dict{Int64, Int64}}
 end
 
 mutable struct VisualizerState

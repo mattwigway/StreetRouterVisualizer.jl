@@ -21,7 +21,7 @@ function read_graph(filename, window)
         LibSpatialIndex.insert!(index, v, [minimum(lons), minimum(lats)], [maximum(lons), maximum(lats)])
     end
 
-    GraphAndMetadata(G, index)
+    GraphAndMetadata(G, index, Dict{Int64, Int64}())
 end
 
 function get_canvas_bbox(canvas, state::VisualizerState)
@@ -68,11 +68,17 @@ function draw_graph(canvas, state::VisualizerState)
     # always draw single segments
     visible_segments = LibSpatialIndex.intersects(state.graph.index, [west, south], [east, north])
     for v in visible_segments
-        if state.view == :normal && v ∈ state.spt
-            sethue(SPT_COLOR)
+        hue = if state.view == :normal && v ∈ state.spt
+            SPT_COLOR
+        elseif state.view == :normal && state.colormode == :strong_components
+            hue_for_restriction(state.graph.strong_components[v])
+        elseif state.view == :turnbased
+            "lightgray"
+        else
+            "black"
         end
+        sethue(hue)
         draw_single_segment(state, v)
-        sethue(state.view == :turnbased ? "lightgray" : "black")
     end
 
     sethue("black")
@@ -80,9 +86,12 @@ function draw_graph(canvas, state::VisualizerState)
         for v in visible_segments
             if v ∈ state.spt
                 sethue(SPT_COLOR)
+            elseif state.colormode == :strong_components
+                sethue(hue_for_restriction(state.graph.strong_components[v]))
+            else
+                sethue("black")
             end
             draw_exploded_segment(state, v)
-            sethue("black")
         end
     end
 
@@ -127,6 +136,13 @@ function draw_single_segment(state, vertex)
     if length(geom) ≥ 2
         for (frll, toll) in zip(geom[1:end-1], geom[2:end])
             line(Luxor.Point(frll.lon, frll.lat), Luxor.Point(toll.lon, toll.lat), :stroke)
+        end
+
+        if state.vertexlabels
+            Luxor.scale(1, -1)
+            fontsize(abs(state.height_degrees / 50))
+            text("$vertex", geom[1].lon, -geom[1].lat, halign=:center)
+            Luxor.scale(1, -1)
         end
     end
 end
@@ -304,7 +320,13 @@ function draw_turn(state, vertex, only_dest)
     elseif vertex ∈ state.spt
         SPT_COLOR
     else
-        hue_idx = get_prop(state.graph.graph, vertex, state.colormode == :turn ? :complex_restriction_idx : :system_idx)
+        hue_idx = if state.colormode == :turn
+            get_prop(state.graph.graph, vertex, :complex_restriction_idx)
+        elseif state.colormode == :system
+            get_prop(state.graph.graph, vertex, :system_idx)
+        elseif state.colormode == :strong_components
+            state.graph.strong_components[vertex]
+        end
         hue_for_restriction(hue_idx)
     end
     sethue(hue)
